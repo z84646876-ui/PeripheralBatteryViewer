@@ -4313,7 +4313,7 @@ class BatteryPanelApp:
                         msg += "（清单缺少 SHA-256 校验值，为安全起见仅支持浏览器手动打开）"
                     upd_var.set(msg)
                     notes_s = str(res_upd.get("notes") or "").strip()
-                    notes_var.set(f"更新说明：{notes_s[:220]}" if notes_s else "")
+                    notes_var.set(f"更新说明：{notes_s[:600]}" if notes_s else "")
                     if res_upd.get("update_available"):
                         lbl_upd.configure(fg=neu_ui.SUCCESS)
                     elif not res_upd.get("ok"):
@@ -4321,6 +4321,11 @@ class BatteryPanelApp:
                     else:
                         lbl_upd.configure(fg=neu_ui.TEXT_MUTED)
                     _refresh_upd_actions()
+                    try:
+                        modal.update_idletasks()
+                        modal._relayout()
+                    except Exception:
+                        pass
                 try:
                     self.root.after(0, _apply)
                 except Exception:

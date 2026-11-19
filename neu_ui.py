@@ -6831,7 +6831,7 @@ class NeuModalOverlay(tk.Canvas):
             body_vis_h = max_body_h
             self._body_canvas.configure(width=max(120, content_w - sb_w), height=body_vis_h)
             self._body_canvas.itemconfigure(
-                self._body_win_id, width=max(120, content_w - sb_w), height=body_req_h
+                self._body_win_id, width=max(120, content_w - sb_w), height=0
             )
             self._body_canvas.configure(scrollregion=(0, 0, max(120, content_w - sb_w), body_req_h))
         else:
@@ -6839,8 +6839,8 @@ class NeuModalOverlay(tk.Canvas):
                 self._body_sb.pack_forget()
             body_vis_h = min(max_body_h, max(min_body_h, body_req_h))
             self._body_canvas.configure(width=content_w, height=body_vis_h)
-            self._body_canvas.itemconfigure(self._body_win_id, width=content_w, height=body_vis_h)
-            self._body_canvas.configure(scrollregion=(0, 0, content_w, body_vis_h))
+            self._body_canvas.itemconfigure(self._body_win_id, width=content_w, height=0)
+            self._body_canvas.configure(scrollregion=(0, 0, content_w, max(body_vis_h, body_req_h)))
 
         content_h = min(max_h, chrome_h + body_vis_h)
         self.itemconfigure(self._win_id, width=content_w, height=content_h)
