@@ -419,7 +419,34 @@ def _ensure_focus_hooks(widget: tk.Misc) -> None:
         top.bind("<KeyPress-Tab>", lambda _e: _mark_keyboard_focus(), add="+")
         top.bind("<Shift-KeyPress-Tab>", lambda _e: _mark_keyboard_focus(), add="+")
         top.bind("<ISO_Left_Tab>", lambda _e: _mark_keyboard_focus(), add="+")
-        top.bind("<ButtonPress-1>", lambda _e: _mark_pointer_focus(), add="+")
+
+        def _on_top_pointer_press(event) -> None:
+            _mark_pointer_focus()
+            try:
+                focused = top.focus_get()
+                if isinstance(focused, (tk.Entry, tk.Text)):
+                    w = getattr(event, "widget", None)
+                    in_same_entry = False
+                    while w is not None:
+                        if w is focused or (isinstance(w, NeuEntry) and w.entry is focused):
+                            in_same_entry = True
+                            break
+                        try:
+                            parent_name = w.winfo_parent()
+                        except Exception:
+                            break
+                        if not parent_name:
+                            break
+                        try:
+                            w = w.nametowidget(parent_name)
+                        except Exception:
+                            break
+                    if not in_same_entry:
+                        top.focus_set()
+            except Exception:
+                pass
+
+        top.bind("<ButtonPress-1>", _on_top_pointer_press, add="+")
     except Exception:
         pass
 
@@ -1267,7 +1294,146 @@ class _ShadowSeedCache:
 _CACHE = _ShadowSeedCache()
 _PILL_PHOTO_CACHE: dict[tuple, bytes] = {}
 _TOGGLE_PHOTO_CACHE: dict[tuple, bytes] = {}
+_OUTLINE_PNG_CACHE: dict[tuple, str] = {}
+_GLYPH_PNG_CACHE: dict[tuple, str] = {}
 _SS_OFFSETS = (0.125, 0.375, 0.625, 0.875)
+
+
+def _encode_rgba_png_b64(w: int, h: int, raw_rows: list[bytes]) -> str:
+    def _chunk(tag: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + tag
+            + payload
+            + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)
+    idat = zlib.compress(b"".join(raw_rows), level=1)
+    png = b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", idat) + _chunk(b"IEND", b"")
+    return base64.b64encode(png).decode("ascii")
+
+
+def _make_aa_rounded_outline_photo(
+    w: int,
+    h: int,
+    *,
+    radius: float,
+    color_hex: str,
+    stroke_width: float = 1.5,
+    master: Optional[tk.Misc] = None,
+) -> tk.PhotoImage:
+    """生成 SDF 抗锯齿圆角描边透明 PNG PhotoImage，消除 Tk Canvas 锯齿与接缝。"""
+    iw = max(4, int(round(w)))
+    ih = max(4, int(round(h)))
+    sw = max(0.8, float(stroke_width))
+    rad_val = max(1.5, float(radius))
+    key = (iw, ih, round(rad_val, 2), color_hex, round(sw, 2))
+    b64 = _OUTLINE_PNG_CACHE.get(key)
+    if b64 is None:
+        r_c, g_c, b_c = hex_to_rgb(color_hex)
+        cx = iw / 2.0
+        cy = ih / 2.0
+        half_w = sw / 2.0
+        hw = max(1.5, (iw - sw - 1.0) / 2.0)
+        hh = max(1.5, (ih - sw - 1.0) / 2.0)
+        rad = min(rad_val, hw, hh)
+        raw_rows: list[bytes] = []
+        for y in range(ih):
+            py = y + 0.5
+            rb = bytearray(1 + iw * 4)
+            pos = 1
+            for x in range(iw):
+                sd = _sdf_rounded_box(x + 0.5, py, cx, cy, hw, hh, rad)
+                cov = max(0.0, min(1.0, 0.5 + half_w - abs(sd)))
+                if cov > 0.0:
+                    rb[pos] = r_c
+                    rb[pos + 1] = g_c
+                    rb[pos + 2] = b_c
+                    rb[pos + 3] = int(cov * 255.0 + 0.5)
+                pos += 4
+            raw_rows.append(bytes(rb))
+        b64 = _encode_rgba_png_b64(iw, ih, raw_rows)
+        _OUTLINE_PNG_CACHE[key] = b64
+    return tk.PhotoImage(data=b64, master=master)
+
+
+def _dist_segment(px: float, py: float, x0: float, y0: float, x1: float, y1: float) -> float:
+    vx = x1 - x0
+    vy = y1 - y0
+    wx = px - x0
+    wy = py - y0
+    seg_len2 = vx * vx + vy * vy
+    if seg_len2 <= 1e-9:
+        return math.hypot(wx, wy)
+    t = max(0.0, min(1.0, (wx * vx + wy * vy) / seg_len2))
+    return math.hypot(wx - t * vx, wy - t * vy)
+
+
+def _make_win_btn_glyph_photo(
+    w: int,
+    h: int,
+    *,
+    kind: str,
+    color_hex: str,
+    sc: float,
+    dy: float = 0.0,
+    master: Optional[tk.Misc] = None,
+) -> tk.PhotoImage:
+    """生成窗口控制按钮的 SDF 抗锯齿透明 PNG 图标。"""
+    iw = max(8, int(round(w)))
+    ih = max(8, int(round(h)))
+    key = (iw, ih, kind, color_hex, round(sc, 2), round(dy, 2))
+    b64 = _GLYPH_PNG_CACHE.get(key)
+    if b64 is None:
+        r_c, g_c, b_c = hex_to_rgb(color_hex)
+        cx = iw / 2.0
+        cy = ih / 2.0 + dy
+        d = 4.6 * sc
+        lw = max(1.4, 1.45 * sc)
+        half_w = lw / 2.0
+        raw_rows: list[bytes] = []
+        for y in range(ih):
+            py = y + 0.5
+            rb = bytearray(1 + iw * 4)
+            pos = 1
+            for x in range(iw):
+                px = x + 0.5
+                if kind == "min":
+                    dist = _dist_segment(px, py, cx - d, cy + 0.5, cx + d, cy + 0.5)
+                elif kind == "max":
+                    dist = abs(_sdf_rounded_box(px, py, cx, cy, d - 0.5, d - 0.5, 1.2 * sc))
+                elif kind == "restore":
+                    off = 1.8 * sc
+                    front_d = abs(
+                        _sdf_rounded_box(
+                            px,
+                            py,
+                            cx - off * 0.5,
+                            cy + off * 0.5,
+                            d - off * 0.5,
+                            d - off * 0.5,
+                            1.0 * sc,
+                        )
+                    )
+                    back_top = _dist_segment(px, py, cx - d + off, cy - d, cx + d, cy - d)
+                    back_right = _dist_segment(px, py, cx + d, cy - d, cx + d, cy + d - off)
+                    dist = min(front_d, back_top, back_right)
+                else:
+                    s1 = _dist_segment(px, py, cx - d + 0.6, cy - d + 0.6, cx + d - 0.6, cy + d - 0.6)
+                    s2 = _dist_segment(px, py, cx + d - 0.6, cy - d + 0.6, cx - d + 0.6, cy + d - 0.6)
+                    dist = min(s1, s2)
+                cov = max(0.0, min(1.0, 0.5 + half_w - dist))
+                if cov > 0.0:
+                    rb[pos] = r_c
+                    rb[pos + 1] = g_c
+                    rb[pos + 2] = b_c
+                    rb[pos + 3] = int(cov * 255.0 + 0.5)
+                pos += 4
+            raw_rows.append(bytes(rb))
+        b64 = _encode_rgba_png_b64(iw, ih, raw_rows)
+        _GLYPH_PNG_CACHE[key] = b64
+    return tk.PhotoImage(data=b64, master=master)
 
 
 def _blend_aa_capsule_rows(
@@ -2475,16 +2641,14 @@ class NeuButton(tk.Canvas):
     def _draw_rounded_outline(
         self, x0: float, y0: float, x1: float, y1: float, r: float, color: str, width: float = 1.5
     ) -> None:
-        r = max(2.0, min(r, (x1 - x0) / 2.0, (y1 - y0) / 2.0))
-        d = r * 2.0
-        self.create_arc(x0, y0, x0 + d, y0 + d, start=90, extent=90, style="arc", outline=color, width=width)
-        self.create_arc(x1 - d, y0, x1, y0 + d, start=0, extent=90, style="arc", outline=color, width=width)
-        self.create_arc(x1 - d, y1 - d, x1, y1, start=270, extent=90, style="arc", outline=color, width=width)
-        self.create_arc(x0, y1 - d, x0 + d, y1, start=180, extent=90, style="arc", outline=color, width=width)
-        self.create_line(x0 + r, y0, x1 - r, y0, fill=color, width=width)
-        self.create_line(x0 + r, y1, x1 - r, y1, fill=color, width=width)
-        self.create_line(x0, y0 + r, x0, y1 - r, fill=color, width=width)
-        self.create_line(x1, y0 + r, x1, y1 - r, fill=color, width=width)
+        pad_px = width + 2.0
+        w = max(4, int(round(x1 - x0 + pad_px)))
+        h = max(4, int(round(y1 - y0 + pad_px)))
+        photo = _make_aa_rounded_outline_photo(
+            w, h, radius=r, color_hex=color, stroke_width=width, master=self
+        )
+        self._outline_photo = photo
+        self.create_image(x0 - pad_px / 2.0, y0 - pad_px / 2.0, anchor="nw", image=photo)
 
 
 class NeuToggle(tk.Frame):
@@ -2733,6 +2897,7 @@ class NeuEntry(NeuCard):
         self.entry.bind("<ButtonPress-1>", self._focus_entry_on_click, add="+")
         self.entry.bind("<FocusIn>", lambda _e: self.set_focus_glow(True), add="+")
         self.entry.bind("<FocusOut>", lambda _e: self.set_focus_glow(False), add="+")
+        _ensure_focus_hooks(self)
 
     def _focus_entry_on_click(self, event=None) -> None:
         if not self.entry.winfo_exists():
@@ -5044,7 +5209,7 @@ class _LinearWinBtn(tk.Canvas):
         self._redraw()
 
     def _set_focus(self, focused: bool) -> None:
-        self._focused = focused
+        self._focused = bool(focused) and bool(_KB_FOCUS_ACTIVE)
         self._redraw()
 
     def _on_key_activate(self) -> None:
@@ -5099,13 +5264,14 @@ class _LinearWinBtn(tk.Canvas):
             self.focus_set()
         except Exception:
             pass
-        self._focused = True
+        self._focused = False
         self._pressed = True
         self._redraw()
 
     def _on_release(self, event=None) -> None:
         was = self._pressed
         self._pressed = False
+        self._focused = False
         self._redraw()
         if was and event is not None and 0 <= event.x <= self._btn_w and 0 <= event.y <= self._btn_h:
             self._command()
@@ -5121,45 +5287,23 @@ class _LinearWinBtn(tk.Canvas):
 
         if self._focused:
             o = max(2, sx(2, self))
-            r = max(4, (self._btn_h - o * 2) * 0.35)
-            d = r * 2.0
-            x0, y0, x1, y1 = o, o, self._btn_w - o, self._btn_h - o
-            self.create_arc(x0, y0, x0 + d, y0 + d, start=90, extent=90, style="arc", outline=BLURPLE_FOCUS, width=1.4)
-            self.create_arc(x1 - d, y0, x1, y0 + d, start=0, extent=90, style="arc", outline=BLURPLE_FOCUS, width=1.4)
-            self.create_arc(x1 - d, y1 - d, x1, y1, start=270, extent=90, style="arc", outline=BLURPLE_FOCUS, width=1.4)
-            self.create_arc(x0, y1 - d, x0 + d, y1, start=180, extent=90, style="arc", outline=BLURPLE_FOCUS, width=1.4)
-            self.create_line(x0 + r, y0, x1 - r, y0, fill=BLURPLE_FOCUS, width=1.4)
-            self.create_line(x0 + r, y1, x1 - r, y1, fill=BLURPLE_FOCUS, width=1.4)
-            self.create_line(x0, y0 + r, x0, y1 - r, fill=BLURPLE_FOCUS, width=1.4)
-            self.create_line(x1, y0 + r, x1, y1 - r, fill=BLURPLE_FOCUS, width=1.4)
+            r = max(4.0, (self._btn_h - o * 2) * 0.35)
+            sw = 1.4
+            pad_px = sw + 2.0
+            fw = max(4, int(round(self._btn_w - o * 2 + pad_px)))
+            fh = max(4, int(round(self._btn_h - o * 2 + pad_px)))
+            self._focus_photo = _make_aa_rounded_outline_photo(
+                fw, fh, radius=r, color_hex=BLURPLE_FOCUS, stroke_width=sw, master=self
+            )
+            self.create_image(o - pad_px / 2.0, o - pad_px / 2.0, anchor="nw", image=self._focus_photo)
 
-        cx = self._btn_w / 2.0
-        cy = self._btn_h / 2.0 + (0.6 if self._pressed else 0.0)
         sc = max(1.0, sx(10, self) / 10.0)
-        d = 4.6 * sc
+        dy = 0.6 if self._pressed else 0.0
         stroke = WIN_BTN_CLOSE_FG if (self._kind == "close" and (self._hover or self._pressed)) else TEXT_MUTED
-        lw = max(1.4, 1.45 * sc)
-
-        if self._kind == "min":
-            self.create_line(cx - d, cy + 1.0, cx + d, cy + 1.0, fill=stroke, width=lw, capstyle="round")
-        elif self._kind == "max":
-            self.create_rectangle(
-                cx - d + 0.5, cy - d + 0.5, cx + d - 0.5, cy + d - 0.5,
-                outline=stroke, width=lw,
-            )
-        elif self._kind == "restore":
-            off = 1.8 * sc
-            # 后层叠框右上角
-            self.create_line(cx - d + off, cy - d, cx + d, cy - d, fill=stroke, width=lw, capstyle="round")
-            self.create_line(cx + d, cy - d, cx + d, cy + d - off, fill=stroke, width=lw, capstyle="round")
-            # 前层框
-            self.create_rectangle(
-                cx - d, cy - d + off, cx + d - off, cy + d,
-                outline=stroke, width=lw,
-            )
-        elif self._kind == "close":
-            self.create_line(cx - d + 0.6, cy - d + 0.6, cx + d - 0.6, cy + d - 0.6, fill=stroke, width=lw, capstyle="round")
-            self.create_line(cx + d - 0.6, cy - d + 0.6, cx - d + 0.6, cy + d - 0.6, fill=stroke, width=lw, capstyle="round")
+        self._glyph_photo = _make_win_btn_glyph_photo(
+            self._btn_w, self._btn_h, kind=self._kind, color_hex=stroke, sc=sc, dy=dy, master=self
+        )
+        self.create_image(0, 0, anchor="nw", image=self._glyph_photo)
 
 
 class NeuTitleBar(tk.Frame):
@@ -5571,16 +5715,14 @@ class NeuIconButton(tk.Canvas):
     def _draw_rounded_outline(
         self, x0: float, y0: float, x1: float, y1: float, r: float, color: str, width: float = 1.6
     ) -> None:
-        r = max(2.0, min(r, (x1 - x0) / 2.0, (y1 - y0) / 2.0))
-        d = r * 2.0
-        self.create_arc(x0, y0, x0 + d, y0 + d, start=90, extent=90, style="arc", outline=color, width=width)
-        self.create_arc(x1 - d, y0, x1, y0 + d, start=0, extent=90, style="arc", outline=color, width=width)
-        self.create_arc(x1 - d, y1 - d, x1, y1, start=270, extent=90, style="arc", outline=color, width=width)
-        self.create_arc(x0, y1 - d, x0 + d, y1, start=180, extent=90, style="arc", outline=color, width=width)
-        self.create_line(x0 + r, y0, x1 - r, y0, fill=color, width=width)
-        self.create_line(x0 + r, y1, x1 - r, y1, fill=color, width=width)
-        self.create_line(x0, y0 + r, x0, y1 - r, fill=color, width=width)
-        self.create_line(x1, y0 + r, x1, y1 - r, fill=color, width=width)
+        pad_px = width + 2.0
+        w = max(4, int(round(x1 - x0 + pad_px)))
+        h = max(4, int(round(y1 - y0 + pad_px)))
+        photo = _make_aa_rounded_outline_photo(
+            w, h, radius=r, color_hex=color, stroke_width=width, master=self
+        )
+        self._outline_photo = photo
+        self.create_image(x0 - pad_px / 2.0, y0 - pad_px / 2.0, anchor="nw", image=photo)
 
     def _redraw(self) -> None:
         self.delete("all")
@@ -6463,6 +6605,63 @@ class NeuModalOverlay(tk.Canvas):
 class NeuSparkline(tk.Frame):
     """外设电量历史趋势微卡片：字号自适应高度、24h/7d 分段切换、悬停数据点读数与极值提示。"""
 
+    @staticmethod
+    def _normalize_hours(hours: int) -> int:
+        val = int(hours)
+        if val >= 720:
+            return 720
+        if val >= 336:
+            return 336
+        if val >= 168:
+            return 168
+        return 24
+
+    def _more_btn_label(self) -> str:
+        if self._hours == 336:
+            return "14天 ▾"
+        if self._hours == 720:
+            return "30天 ▾"
+        return "更多 ▾"
+
+    def _sync_more_btn(self) -> None:
+        is_more = self._hours in (336, 720)
+        self._more_btn._text = self._more_btn_label()
+        self._more_btn._custom_fg = BLURPLE_BRAND if is_more else TEXT_MUTED
+        self._more_btn._weight = "bold" if is_more else "normal"
+        self._more_btn._font = ui_font(FONT_CAPTION, weight=self._more_btn._weight, root=self._more_btn)
+        self._more_btn._inset_active = is_more
+        self._more_btn._resize_and_render()
+
+    def _open_more_menu(self) -> None:
+        if self._more_menu is not None:
+            try:
+                if self._more_menu.is_open():
+                    self._more_menu.close(restore_focus=False)
+                    return
+            except Exception:
+                pass
+        items = [
+            {
+                "label": "14天",
+                "checked": self._hours == 336,
+                "command": lambda: self.set_hours(336),
+            },
+            {
+                "label": "30天",
+                "checked": self._hours == 720,
+                "command": lambda: self.set_hours(720),
+            },
+        ]
+        bx = self._more_btn.winfo_rootx() + self._more_btn.winfo_width()
+        by = self._more_btn.winfo_rooty() + self._more_btn.winfo_height() + sx(2, self)
+        self._more_menu = NeuPopupMenu(
+            self.winfo_toplevel(),
+            items,
+            min_width_dp=92,
+            right_align=True,
+        )
+        self._more_menu.open_at(bx, by)
+
     def __init__(
         self,
         parent: tk.Widget,
@@ -6474,13 +6673,14 @@ class NeuSparkline(tk.Frame):
         eff_bg = BASE if surface_bg is None else surface_bg
         super().__init__(parent, bg=eff_bg, bd=0, highlightthickness=0, takefocus=0)
         self._surface_bg = eff_bg
-        self._hours = 168 if initial_hours >= 168 else 24
+        self._hours = self._normalize_hours(initial_hours)
         self._on_window_change = on_window_change
         self._samples: list[dict[str, Any]] = []
         self._accent = BAR_GREEN
         self._offline = False
         self._plotted_pts: list[tuple[float, float, int, float]] = []
         self._hover_idx: Optional[int] = None
+        self._more_menu: Optional[NeuPopupMenu] = None
 
         self._top = tk.Frame(self, bg=eff_bg)
         self._top.pack(fill="x", pady=(0, sx(4, self)))
@@ -6501,6 +6701,24 @@ class NeuSparkline(tk.Frame):
             initial_value=self._hours,
             on_change=self.set_hours,
         )
+        is_more = self._hours in (336, 720)
+        self._more_btn = NeuButton(
+            self._top,
+            text=self._more_btn_label(),
+            command=self._open_more_menu,
+            radius=11,
+            pad=3,
+            padx=8,
+            pady=2,
+            height=max(16, int(round(self._switch._seg_tot_h - 6))),
+            font_size=FONT_CAPTION,
+            weight="bold" if is_more else "normal",
+            fg=BLURPLE_BRAND if is_more else TEXT_MUTED,
+            inset_active=is_more,
+            surface_bg=eff_bg,
+            tooltip="更多时间范围（14天 / 30天）",
+        )
+        self._more_btn.pack(side="right", padx=(sx(4, self), 0))
         self._switch.pack(side="right")
 
         self._lbl_stat = tk.Label(
@@ -6581,14 +6799,30 @@ class NeuSparkline(tk.Frame):
             t_str = ""
         lbl = f"{t_str}{TEXT_SEP}{lvl}%" if t_str else f"{lvl}%"
         fnt = ui_font(FONT_CAPTION, "bold", root=self)
-        tx = max(sx(44, self), min(w - sx(44, self), px))
         ty = max(sx(10, self), min(h - sx(10, self), py - sx(12, self) if py > sx(22, self) else py + sx(12, self)))
-        tid = c.create_text(tx, ty, text=lbl, fill=TEXT, font=fnt, tags="hover")
+        tid = c.create_text(px, ty, text=lbl, fill=TEXT, font=fnt, tags="hover")
         bx = c.bbox(tid)
         if bx is not None:
             bg_pad = sx(4, self)
+            x0, y0, x1, y1 = bx[0] - bg_pad, bx[1] - 2, bx[2] + bg_pad, bx[3] + 2
+            dx = 0.0
+            if x0 < 2:
+                dx = 2 - x0
+            elif x1 > w - 2:
+                dx = (w - 2) - x1
+            dy = 0.0
+            if y0 < 2:
+                dy = 2 - y0
+            elif y1 > h - 2:
+                dy = (h - 2) - y1
+            if dx != 0.0 or dy != 0.0:
+                c.move(tid, dx, dy)
+                x0 += dx
+                x1 += dx
+                y0 += dy
+                y1 += dy
             rect = c.create_rectangle(
-                bx[0] - bg_pad, bx[1] - 2, bx[2] + bg_pad, bx[3] + 2,
+                x0, y0, x1, y1,
                 fill=POPUP_BG, outline=POPUP_BORDER, width=1, tags="hover",
             )
             c.tag_raise(tid, rect)
@@ -6601,17 +6835,19 @@ class NeuSparkline(tk.Frame):
             self._lbl_title.configure(bg=surface_bg)
             self._lbl_stat.configure(bg=surface_bg)
             self._switch.set_surface_bg(surface_bg)
+            self._more_btn.set_surface_bg(surface_bg)
             self._well.set_outer_bg(surface_bg)
             self._well.set_muted(self._offline, fill_hex=surface_bg)
             self._canvas.configure(bg=surface_bg)
             self._draw()
 
     def set_hours(self, hours: int) -> None:
-        target = 168 if int(hours) >= 168 else 24
+        target = self._normalize_hours(hours)
         if target == self._hours:
             return
         self._hours = target
         self._switch.set_value(target)
+        self._sync_more_btn()
         if self._on_window_change:
             self._on_window_change(self._hours)
         else:
@@ -6673,7 +6909,7 @@ class NeuSparkline(tk.Frame):
 
         lvls = [int(pt["lvl"]) for pt in pts]
         hi_v, lo_v, cur_v = max(lvls), min(lvls), lvls[-1]
-        span_tag = "7天" if self._hours >= 168 else "24h"
+        span_tag = {24: "24h", 168: "7天", 336: "14天", 720: "30天"}.get(self._hours, f"{self._hours // 24}天")
         stat_full = f"{span_tag} 高 {hi_v}%{TEXT_SEP}低 {lo_v}%{TEXT_SEP}当前 {cur_v}%"
         stat_short = f"高 {hi_v}%{TEXT_SEP}低 {lo_v}%"
         self._lbl_stat.configure(text=stat_full if w >= sx(260, self) else stat_short)

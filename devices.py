@@ -484,6 +484,9 @@ def _merge_dual_mode_readings(
     return merged_list, cfg_dirty
 
 
+HEADSET_24G_POWER_FACTOR = 1.5
+
+
 def _populate_history_metrics(
     readings: list[PeripheralReading],
     hist: dict[str, Any],
@@ -539,6 +542,38 @@ def _populate_history_metrics(
         elif est is not None and rate_h and rate_h > 0 and r.interpolated and r.level is not None:
             est = round(max(0.2, min(500.0, float(r.level) / rate_h)), 1)
             dep_ts = now + est * 3600.0
+
+        # 耳机切换至纯 2.4G 模式时功耗增加 50%：按蓝牙基线速率 × 1.5 重新估算剩余续航
+        conn_l = (r.connection or "").lower()
+        is_headset_24g_only = (
+            r.role == "headset"
+            and "2.4g" in conn_l
+            and "蓝牙" not in conn_l
+            and not r.offline
+            and not r.charging
+            and not r.full
+            and r.level is not None
+        )
+        if is_headset_24g_only:
+            base_rate = float(rate_h) if (rate_h and rate_h > 0) else None
+            if base_rate is None and r.transport in ("BT", "BLE"):
+                learned_q, _ = battery_history._learn_quantized_step_rate(
+                    series, ts_now=now, max_gap_sec=max_gap_sec
+                )
+                base_rate = (
+                    float(learned_q)
+                    if (learned_q and learned_q > 0)
+                    else float(battery_history.DEFAULT_BT_QUANTIZED_RATE_PER_H)
+                )
+            if base_rate is not None and base_rate > 0:
+                rate_h = round(base_rate * HEADSET_24G_POWER_FACTOR, 1)
+                est = round(max(0.2, min(500.0, float(r.level) / rate_h)), 1)
+                dep_ts = now + est * 3600.0
+                if r.stale and "沿用上次蓝牙读数" in (r.detail or ""):
+                    r.detail = (
+                        f"2.4G 接收器不支持电量回传 · 沿用上次蓝牙读数 {int(r.level)}%"
+                        f"（2.4G 功耗 +50% · 按 {rate_h:.1f}%/h 估算）"
+                    )
 
         chg_mins, _, chg_ts = battery_history.estimate_charge_details(
             series, raw_lvl, charging=r.charging, offline=r.offline, full=r.full, now=now

@@ -19,9 +19,9 @@ from typing import Any, Callable, Optional
 
 import win_shell
 
-__version__ = "2.4.0"
+__version__ = "1.1.0"
 APP_VERSION = __version__
-APP_BUILD_DATE = "2026-11-18"
+APP_BUILD_DATE = "2026-11-20"
 APP_DISPLAY_NAME = "外设电量查看器"
 APP_NAME = "PeripheralBatteryViewer"
 

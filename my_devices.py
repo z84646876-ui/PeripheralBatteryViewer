@@ -1463,7 +1463,6 @@ class BatteryPanelApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_request_close)
         self.root.bind("<Destroy>", self._on_destroy, add="+")
         self.root.bind("<Configure>", self._on_root_configure, add="+")
-        self._bind_shortcuts()
 
         self._build_ui()
         if self.cfg.get("window_maximized") and not disable_tray_host:
@@ -1578,28 +1577,6 @@ class BatteryPanelApp:
             tray_common.save_config(self.cfg)
         except Exception:
             pass
-
-    def _bind_shortcuts(self) -> None:
-        def _guard(fn) -> Optional[str]:
-            try:
-                f = self.root.focus_get()
-                if isinstance(f, (tk.Entry, tk.Text)):
-                    return None
-            except Exception:
-                pass
-            fn()
-            return "break"
-
-        self.root.bind("<F5>", lambda _e: self.refresh_now())
-        self.root.bind("<Control-r>", lambda _e: _guard(self.refresh_now))
-        self.root.bind("<Control-R>", lambda _e: _guard(self.refresh_now))
-        self.root.bind("<Control-comma>", lambda _e: _guard(self.open_settings_modal))
-        self.root.bind("<Control-l>", lambda _e: _guard(self.open_error_log_modal))
-        self.root.bind("<Control-L>", lambda _e: _guard(self.open_error_log_modal))
-        self.root.bind("<Control-d>", lambda _e: _guard(lambda: self.open_debug_tool(None)))
-        self.root.bind("<Control-D>", lambda _e: _guard(lambda: self.open_debug_tool(None)))
-        self.root.bind("<Control-f>", lambda _e: self._focus_search_box())
-        self.root.bind("<Control-F>", lambda _e: self._focus_search_box())
 
     def _rebuild_ui(self, *, reopen_settings: bool = False) -> None:
         """DPI 切换 / 主题切换 / 字号调整后整树重建 UI，保留滚动位置与浮层连续性。"""
@@ -1726,7 +1703,7 @@ class BatteryPanelApp:
             pad=10,
             padx=10,
             pady=7,
-            tooltip="设置与偏好 (Ctrl+,)",
+            tooltip="设置与偏好",
             accessible_name="打开设置",
         )
         self.btn_settings.pack(side="right")
@@ -1742,7 +1719,7 @@ class BatteryPanelApp:
             weight="bold",
             padx=18,
             pady=7,
-            tooltip="立即刷新全部外设电量 (Ctrl+R / F5)",
+            tooltip="立即刷新全部外设电量",
         )
         self.btn_refresh.pack(side="right", padx=(0, neu_ui.sx(4, self.root)))
 
@@ -1871,7 +1848,7 @@ class BatteryPanelApp:
             padx=9,
             pady=2,
             fg=neu_ui.TEXT_MUTED,
-            tooltip="查看本地异常日志详情 (Ctrl+L)",
+            tooltip="查看本地异常日志详情",
         )
 
         # ---- 快捷搜索与状态筛选栏（#4） ----
@@ -1900,7 +1877,7 @@ class BatteryPanelApp:
             font_tuple=neu_ui.ui_font(neu_ui.FONT_CAPTION, root=self.root),
         )
         self._search_entry.pack(side="left")
-        neu_ui.attach_tooltip(self._search_entry, "按名称、型号、VID:PID 或通道搜索 (Ctrl+F)")
+        neu_ui.attach_tooltip(self._search_entry, "按名称、型号、VID:PID 或通道搜索")
         self._btn_clear_search = neu_ui.NeuButton(
             search_wrap,
             text="×",
@@ -2846,7 +2823,7 @@ class BatteryPanelApp:
             padx=14,
             pady=6,
             font_size=neu_ui.FONT_BODY,
-            tooltip="打开 HID/蓝牙接口探测与协议标定面板 (Ctrl+D)",
+            tooltip="打开 HID/蓝牙接口探测与协议标定面板",
         ).pack(side="left", padx=(0, neu_ui.sx(6, body)))
 
         neu_ui.NeuButton(
@@ -2872,7 +2849,7 @@ class BatteryPanelApp:
             pady=6,
             font_size=neu_ui.FONT_CAPTION,
             fg=neu_ui.TEXT_MUTED,
-            tooltip="查看多级日志与扫描诊断摘要 (Ctrl+L)",
+            tooltip="查看多级日志与扫描诊断摘要",
         ).pack(side="left", padx=(0, neu_ui.sx(6, body)))
 
         neu_ui.NeuButton(
@@ -2906,8 +2883,7 @@ class BatteryPanelApp:
             body,
             text=(
                 f"版本 v{tray_common.APP_VERSION} ({tray_common.APP_BUILD_DATE}){neu_ui.TEXT_SEP}"
-                f"开机自启状态：{auto_msg}{neu_ui.TEXT_SEP}历史记录自动保留最近 {ret_days_info} 天\n"
-                "快捷键：Ctrl+F 搜索 · Ctrl+R / F5 刷新 · Ctrl+, 设置 · Ctrl+L 日志 · Ctrl+D 调试"
+                f"开机自启状态：{auto_msg}{neu_ui.TEXT_SEP}历史记录自动保留最近 {ret_days_info} 天"
             ),
             bg=neu_ui.BASE,
             fg=neu_ui.TEXT_DIM,
@@ -5347,14 +5323,6 @@ class BatteryPanelApp:
         except Exception:
             pass
         self._schedule_heartbeat()
-
-    def _focus_search_box(self) -> None:
-        if hasattr(self, "_search_entry") and self._search_entry.winfo_exists():
-            try:
-                self._search_entry.entry.focus_set()
-                self._search_entry.entry.selection_range(0, "end")
-            except Exception:
-                pass
 
     def _on_search_changed(self) -> None:
         if self._rebuild_pending or self._closing or not hasattr(self, "_var_search"):
