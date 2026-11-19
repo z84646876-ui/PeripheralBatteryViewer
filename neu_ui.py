@@ -1296,6 +1296,8 @@ _PILL_PHOTO_CACHE: dict[tuple, bytes] = {}
 _TOGGLE_PHOTO_CACHE: dict[tuple, bytes] = {}
 _OUTLINE_PNG_CACHE: dict[tuple, str] = {}
 _GLYPH_PNG_CACHE: dict[tuple, str] = {}
+_HOVER_PILL_CACHE: dict[tuple, str] = {}
+_HOVER_DOT_CACHE: dict[tuple, str] = {}
 _SS_OFFSETS = (0.125, 0.375, 0.625, 0.875)
 
 
@@ -1433,6 +1435,123 @@ def _make_win_btn_glyph_photo(
             raw_rows.append(bytes(rb))
         b64 = _encode_rgba_png_b64(iw, ih, raw_rows)
         _GLYPH_PNG_CACHE[key] = b64
+    return tk.PhotoImage(data=b64, master=master)
+
+
+def _make_aa_pill_badge_photo(
+    w: int,
+    h: int,
+    *,
+    fill_hex: str,
+    border_hex: str,
+    radius: float,
+    dark_theme: bool,
+    master: Optional[tk.Misc] = None,
+) -> tk.PhotoImage:
+    """生成带柔和新拟物微阴影与圆角抗锯齿边框的透明 PNG 胶囊背景。"""
+    iw = max(12, int(round(w)))
+    ih = max(12, int(round(h)))
+    rad_val = max(3.0, float(radius))
+    key = (iw, ih, fill_hex, border_hex, round(rad_val, 2), bool(dark_theme))
+    b64 = _HOVER_PILL_CACHE.get(key)
+    if b64 is None:
+        fr, fg, fb = hex_to_rgb(fill_hex)
+        br, bg_c, bb = hex_to_rgb(border_hex)
+        sr, sg, sb = (6, 8, 14) if dark_theme else (82, 95, 118)
+        pad_l, pad_t, pad_r, pad_b = 3.0, 2.0, 3.0, 4.0
+        bw = max(4.0, iw - pad_l - pad_r)
+        bh = max(4.0, ih - pad_t - pad_b)
+        cx = pad_l + bw / 2.0
+        cy = pad_t + bh / 2.0
+        hw = bw / 2.0
+        hh = bh / 2.0
+        rad = min(rad_val, hw, hh)
+        raw_rows: list[bytes] = []
+        for y in range(ih):
+            py = y + 0.5
+            rb = bytearray(1 + iw * 4)
+            pos = 1
+            for x in range(iw):
+                px = x + 0.5
+                sd = _sdf_rounded_box(px, py, cx, cy, hw, hh, rad)
+                fill_cov = max(0.0, min(1.0, 0.5 - sd))
+                # 细微外边框（1px SDF 抗锯齿）
+                rim_cov = max(0.0, min(1.0, 0.5 + 0.55 - abs(sd + 0.35)))
+                # 底部轻柔投影
+                sd_sh = _sdf_rounded_box(px, py - 1.4, cx, cy, hw, hh, rad)
+                sh_a = max(0.0, min(1.0, (2.6 - sd_sh) / 3.0)) * (0.34 if dark_theme else 0.16)
+                if fill_cov > 0.0:
+                    # 内部由填充色与内沿边框混色
+                    b_mix = rim_cov * (0.85 if dark_theme else 0.65)
+                    cr = int(fr * (1.0 - b_mix) + br * b_mix + 0.5)
+                    cg = int(fg * (1.0 - b_mix) + bg_c * b_mix + 0.5)
+                    cb = int(fb * (1.0 - b_mix) + bb * b_mix + 0.5)
+                    out_a = fill_cov + sh_a * (1.0 - fill_cov)
+                    if out_a > 1e-6:
+                        rr = int((cr * fill_cov + sr * sh_a * (1.0 - fill_cov)) / out_a + 0.5)
+                        rg = int((cg * fill_cov + sg * sh_a * (1.0 - fill_cov)) / out_a + 0.5)
+                        rbl = int((cb * fill_cov + sb * sh_a * (1.0 - fill_cov)) / out_a + 0.5)
+                        rb[pos] = rr
+                        rb[pos + 1] = rg
+                        rb[pos + 2] = rbl
+                        rb[pos + 3] = int(out_a * 255.0 + 0.5)
+                elif sh_a > 0.0:
+                    ai = int(sh_a * 255.0 + 0.5)
+                    if ai > 0:
+                        rb[pos] = sr
+                        rb[pos + 1] = sg
+                        rb[pos + 2] = sb
+                        rb[pos + 3] = ai
+                pos += 4
+            raw_rows.append(bytes(rb))
+        b64 = _encode_rgba_png_b64(iw, ih, raw_rows)
+        _HOVER_PILL_CACHE[key] = b64
+    return tk.PhotoImage(data=b64, master=master)
+
+
+def _make_aa_dot_photo(
+    r_px: float,
+    *,
+    fill_hex: str,
+    ring_hex: str,
+    ring_w: float = 1.6,
+    master: Optional[tk.Misc] = None,
+) -> tk.PhotoImage:
+    """生成 SDF 抗锯齿圆点透明 PNG（带外描边环）。"""
+    rad = max(2.5, float(r_px))
+    rw = max(1.0, float(ring_w))
+    sz = int(math.ceil((rad + rw + 1.5) * 2.0))
+    if sz % 2 == 1:
+        sz += 1
+    key = (sz, round(rad, 2), fill_hex, ring_hex, round(rw, 2))
+    b64 = _HOVER_DOT_CACHE.get(key)
+    if b64 is None:
+        fr, fg, fb = hex_to_rgb(fill_hex)
+        rr, rg, rb_c = hex_to_rgb(ring_hex)
+        c = sz / 2.0
+        outer_r = rad + rw * 0.5
+        inner_r = rad - rw * 0.5
+        raw_rows: list[bytes] = []
+        for y in range(sz):
+            py = y + 0.5
+            rb = bytearray(1 + sz * 4)
+            pos = 1
+            for x in range(sz):
+                dist = math.hypot(x + 0.5 - c, py - c)
+                outer_cov = max(0.0, min(1.0, 0.5 + outer_r - dist))
+                if outer_cov > 0.0:
+                    inner_cov = max(0.0, min(1.0, 0.5 + inner_r - dist))
+                    cr = int(rr * (1.0 - inner_cov) + fr * inner_cov + 0.5)
+                    cg = int(rg * (1.0 - inner_cov) + fg * inner_cov + 0.5)
+                    cb = int(rb_c * (1.0 - inner_cov) + fb * inner_cov + 0.5)
+                    rb[pos] = cr
+                    rb[pos + 1] = cg
+                    rb[pos + 2] = cb
+                    rb[pos + 3] = int(outer_cov * 255.0 + 0.5)
+                pos += 4
+            raw_rows.append(bytes(rb))
+        b64 = _encode_rgba_png_b64(sz, sz, raw_rows)
+        _HOVER_DOT_CACHE[key] = b64
     return tk.PhotoImage(data=b64, master=master)
 
 
@@ -6787,11 +6906,11 @@ class NeuSparkline(tk.Frame):
         pad_y = sx(5, self)
         c.create_line(px, pad_y, px, h - pad_y, fill=TEXT_DIM, width=1, dash=(2, 2), tags="hover")
         r = max(3.5, sx(4, self))
-        c.create_oval(
-            px - r, py - r, px + r, py + r,
-            fill=BLURPLE_BRAND if not self._offline else TEXT_DISABLED,
-            outline=self._surface_bg, width=1.5, tags="hover",
+        dot_col = BLURPLE_BRAND if not self._offline else TEXT_DISABLED
+        self._hover_dot_photo = _make_aa_dot_photo(
+            r, fill_hex=dot_col, ring_hex=self._surface_bg, ring_w=1.6, master=c
         )
+        c.create_image(px, py, anchor="center", image=self._hover_dot_photo, tags="hover")
         try:
             lt = time.localtime(ts)
             t_str = time.strftime("%m-%d %H:%M" if self._hours > 24 else "%H:%M", lt)
@@ -6799,33 +6918,44 @@ class NeuSparkline(tk.Frame):
             t_str = ""
         lbl = f"{t_str}{TEXT_SEP}{lvl}%" if t_str else f"{lvl}%"
         fnt = ui_font(FONT_CAPTION, "bold", root=self)
-        ty = max(sx(10, self), min(h - sx(10, self), py - sx(12, self) if py > sx(22, self) else py + sx(12, self)))
+        ty = max(sx(12, self), min(h - sx(12, self), py - sx(14, self) if py > sx(24, self) else py + sx(14, self)))
         tid = c.create_text(px, ty, text=lbl, fill=TEXT, font=fnt, tags="hover")
         bx = c.bbox(tid)
         if bx is not None:
-            bg_pad = sx(4, self)
-            x0, y0, x1, y1 = bx[0] - bg_pad, bx[1] - 2, bx[2] + bg_pad, bx[3] + 2
+            pad_x = sx(8, self)
+            pad_v = sx(3, self)
+            sh_l, sh_t, sh_r, sh_b = 3, 2, 3, 4
+            pill_w = int(round((bx[2] - bx[0]) + pad_x * 2 + sh_l + sh_r))
+            pill_h = int(round((bx[3] - bx[1]) + pad_v * 2 + sh_t + sh_b))
+            x0 = bx[0] - pad_x - sh_l
+            y0 = bx[1] - pad_v - sh_t
+            x1 = x0 + pill_w
+            y1 = y0 + pill_h
             dx = 0.0
-            if x0 < 2:
-                dx = 2 - x0
-            elif x1 > w - 2:
-                dx = (w - 2) - x1
+            if x0 < 1:
+                dx = 1 - x0
+            elif x1 > w - 1:
+                dx = (w - 1) - x1
             dy = 0.0
-            if y0 < 2:
-                dy = 2 - y0
-            elif y1 > h - 2:
-                dy = (h - 2) - y1
+            if y0 < 1:
+                dy = 1 - y0
+            elif y1 > h - 1:
+                dy = (h - 1) - y1
             if dx != 0.0 or dy != 0.0:
                 c.move(tid, dx, dy)
                 x0 += dx
-                x1 += dx
                 y0 += dy
-                y1 += dy
-            rect = c.create_rectangle(
-                x0, y0, x1, y1,
-                fill=POPUP_BG, outline=POPUP_BORDER, width=1, tags="hover",
+            self._hover_pill_photo = _make_aa_pill_badge_photo(
+                pill_w,
+                pill_h,
+                fill_hex=POPUP_BG,
+                border_hex=POPUP_BORDER,
+                radius=(pill_h - sh_t - sh_b) * 0.5,
+                dark_theme=is_dark_theme(),
+                master=c,
             )
-            c.tag_raise(tid, rect)
+            bg_id = c.create_image(x0, y0, anchor="nw", image=self._hover_pill_photo, tags="hover")
+            c.tag_raise(tid, bg_id)
 
     def set_surface_bg(self, surface_bg: str) -> None:
         if surface_bg != self._surface_bg:
