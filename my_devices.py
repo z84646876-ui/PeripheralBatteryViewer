@@ -422,6 +422,7 @@ class DeviceCard(neu_ui.NeuCard):
         on_open_history=None,
         on_set_threshold=None,
         on_set_capacity=None,
+        on_bt_full_override=None,
     ) -> None:
         self._compact = bool(compact)
         super().__init__(
@@ -461,6 +462,7 @@ class DeviceCard(neu_ui.NeuCard):
         self.on_open_history = on_open_history
         self.on_set_threshold = on_set_threshold
         self.on_set_capacity = on_set_capacity
+        self.on_bt_full_override = on_bt_full_override
 
         inner = self.content
         self._has_probe = bool(
@@ -910,6 +912,21 @@ class DeviceCard(neu_ui.NeuCard):
                 "type": "item",
                 "label": "暂缓低电提醒 30 分钟",
                 "command": lambda: self.on_snooze(r, 30),
+            })
+        if r.transport in ("BT", "BLE") and self.on_bt_full_override:
+            is_full_marked = bool(getattr(r, "manual_full_override", False))
+            items.append({"type": "separator"})
+            items.append({
+                "type": "item",
+                "label": "已充满电",
+                "checked": is_full_marked,
+                "command": lambda: self.on_bt_full_override(r, True),
+            })
+            items.append({
+                "type": "item",
+                "label": "误点已充满电",
+                "disabled": not is_full_marked,
+                "command": lambda: self.on_bt_full_override(r, False),
             })
         if self.on_set_threshold:
             th_sub = [
@@ -4061,6 +4078,7 @@ class BatteryPanelApp:
                         on_open_history=self.open_history_modal,
                         on_set_threshold=self._set_device_threshold,
                         on_set_capacity=self._set_device_capacity,
+                        on_bt_full_override=self._on_bt_full_override,
                     )
                     self._card_widgets.append(card)
         else:
@@ -4089,6 +4107,7 @@ class BatteryPanelApp:
                     on_open_history=self.open_history_modal,
                     on_set_threshold=self._set_device_threshold,
                     on_set_capacity=self._set_device_capacity,
+                    on_bt_full_override=self._on_bt_full_override,
                 )
                 self._card_widgets.append(card)
         self._layout_card_grid()
@@ -5465,6 +5484,47 @@ class BatteryPanelApp:
         if self.tray_host:
             self.tray_host.update_readings(self.readings, threshold=g_th, device_thresholds=per)
         self.hover_tooltip.update_data(self.readings, threshold=g_th, device_thresholds=per)
+
+    def _on_bt_full_override(self, r: devices.PeripheralReading, enable: bool) -> None:
+        if r.transport not in ("BT", "BLE"):
+            return
+        cfg = tray_common.load_config()
+        ov_map = dict(cfg.get("bt_full_overrides") or {})
+        if enable:
+            base_raw = r.raw_level if r.raw_level is not None else r.level
+            ov_map[r.key] = {
+                "marked_at": time.time(),
+                "base_raw": int(base_raw) if base_raw is not None else None,
+            }
+            cfg["bt_full_overrides"] = ov_map
+            tray_common.save_config(cfg)
+            self.cfg = cfg
+            devices._apply_bt_full_overrides(self.readings, cfg)
+            devices._populate_history_metrics(
+                self.readings,
+                battery_history.load_history(),
+                time.time(),
+            )
+            self._render_cards(self.readings)
+            if self.tray_host is not None:
+                try:
+                    self.tray_host.update_readings(
+                        self.readings,
+                        threshold=int(cfg.get("notify_threshold", 20)),
+                        tray_style=str(cfg.get("tray_icon_style", "digit")),
+                        tray_visibility=str(cfg.get("tray_visibility", "always")),
+                        hover_mode=str(cfg.get("tray_hover_mode", "grid")),
+                        cfg=cfg,
+                    )
+                except Exception:
+                    pass
+        else:
+            ov_map.pop(r.key, None)
+            cfg["bt_full_overrides"] = ov_map
+            tray_common.save_config(cfg)
+            self.cfg = cfg
+            r.manual_full_override = False
+            self.refresh_now()
 
     def _set_device_capacity(self, r: devices.PeripheralReading) -> None:
         cur_cap, _ = tray_common.get_device_capacity_mah(self.cfg, r.key, r.role)

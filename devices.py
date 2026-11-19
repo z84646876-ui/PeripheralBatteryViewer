@@ -69,6 +69,7 @@ class PeripheralReading:
     stale: bool = False
     pinned: bool = False
     manual: bool = False
+    manual_full_override: bool = False
     connection: str = ""
     source: str = ""
     detail: str = ""
@@ -487,6 +488,51 @@ def _merge_dual_mode_readings(
 HEADSET_24G_POWER_FACTOR = 1.5
 
 
+def _apply_bt_full_overrides(
+    readings: list[PeripheralReading],
+    cfg: dict[str, Any],
+) -> bool:
+    """对仅支持蓝牙读取电量的设备应用/自动清理用户手动「已充满电」100% 校准标记。"""
+    ov_raw = cfg.get("bt_full_overrides")
+    if not isinstance(ov_raw, dict) or not ov_raw:
+        return False
+    ov_map = dict(ov_raw)
+    dirty = False
+    for r in readings:
+        if r.key not in ov_map:
+            continue
+        if r.transport not in ("BT", "BLE"):
+            ov_map.pop(r.key, None)
+            dirty = True
+            continue
+        entry = ov_map.get(r.key)
+        base_raw = entry.get("base_raw") if isinstance(entry, dict) else None
+        # 若硬件后续上报了真实的 100% 或明显低于基线掉档，说明已无需手动校准
+        if (not r.offline) and (not r.stale) and (r.level is not None):
+            cur_hw = int(r.level)
+            if cur_hw >= 100 or (isinstance(base_raw, (int, float)) and cur_hw < int(base_raw)):
+                ov_map.pop(r.key, None)
+                dirty = True
+                continue
+        if r.offline:
+            continue
+        r.manual_full_override = True
+        r.level = 100
+        r.raw_level = 100
+        r.interpolated = False
+        r.stale = False
+        r.charging = False
+        r.full = True
+        r.connected = True
+        r.error = ""
+        r.last_read_error = ""
+        merged_note = " · 已合并 2.4G" if "2.4g" in (r.connection or "").lower() else ""
+        r.detail = f"已手动标记充满 100%{merged_note}（可在「更多 → 误点已充满电」取消）"
+    if dirty:
+        cfg["bt_full_overrides"] = ov_map
+    return dirty
+
+
 def _populate_history_metrics(
     readings: list[PeripheralReading],
     hist: dict[str, Any],
@@ -506,6 +552,7 @@ def _populate_history_metrics(
             and not r.stale
             and not r.charging
             and not r.full
+            and not r.manual_full_override
             and raw_lvl is not None
         ):
             interp_res = battery_history.interpolate_quantized_bt_level(
@@ -976,14 +1023,18 @@ def scan_peripherals_with_stats(
 
     if save_cache:
         hist = battery_history.record_readings(readings, now=now)
-        if cfg_dirty:
-            cfg["known_devices"] = known_map
-            # 合并写回磁盘配置，防止耗时扫描期间用户实时修改的主题/视图/阈值等设置被旧快照覆盖
-            disk_cfg = tray_common.load_config()
-            disk_cfg["known_devices"] = known_map
-            tray_common.save_config(disk_cfg)
     else:
         hist = hist_pre
+
+    ov_dirty = _apply_bt_full_overrides(readings, cfg)
+    if save_cache and (cfg_dirty or ov_dirty):
+        cfg["known_devices"] = known_map
+        # 合并写回磁盘配置，防止耗时扫描期间用户实时修改的主题/视图/阈值等设置被旧快照覆盖
+        disk_cfg = tray_common.load_config()
+        disk_cfg["known_devices"] = known_map
+        if ov_dirty:
+            disk_cfg["bt_full_overrides"] = dict(cfg.get("bt_full_overrides") or {})
+        tray_common.save_config(disk_cfg)
 
     try:
         bg_iv = float(cfg.get("bg_interval", 300) or 300)

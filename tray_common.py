@@ -206,6 +206,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "device_names": {},
     "device_thresholds": {},
     "device_capacities_mah": {},
+    "bt_full_overrides": {},
     "known_devices": {},
     "last_readings": {},
     "log_level": "INFO",
@@ -833,7 +834,7 @@ def load_config() -> dict[str, Any]:
             cfg[k] = seen
     if isinstance(cfg.get("pinned_devices"), list) and not cfg["pinned"]:
         cfg["pinned"] = [str(x).strip() for x in cfg["pinned_devices"] if str(x).strip()]
-    for k in ("device_names", "last_readings", "known_devices", "device_roles", "device_thresholds", "device_capacities_mah"):
+    for k in ("device_names", "last_readings", "known_devices", "device_roles", "device_thresholds", "device_capacities_mah", "bt_full_overrides"):
         if not isinstance(cfg.get(k), dict):
             cfg[k] = {}
     if cfg["device_roles"]:
