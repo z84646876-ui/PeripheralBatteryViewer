@@ -1555,6 +1555,172 @@ def _make_aa_dot_photo(
     return tk.PhotoImage(data=b64, master=master)
 
 
+def _simplify_sparkline_anchors(
+    poly_pts: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """把长平台期整数电量折线简化为平滑过渡锚点（保留首尾及陡变处，消除阶梯突变）。"""
+    n = len(poly_pts)
+    if n <= 2:
+        return list(poly_pts)
+    anchors: list[tuple[float, float]] = [poly_pts[0]]
+    i = 0
+    while i < n:
+        y_val = poly_pts[i][1]
+        j = i
+        while j + 1 < n and abs(poly_pts[j + 1][1] - y_val) < 0.05:
+            j += 1
+        if i > 0 and j < n - 1:
+            mid_x = 0.5 * (poly_pts[i][0] + poly_pts[j][0])
+            anchors.append((mid_x, y_val))
+        i = j + 1
+    if abs(anchors[-1][0] - poly_pts[-1][0]) > 0.5 or abs(anchors[-1][1] - poly_pts[-1][1]) > 0.05:
+        anchors.append(poly_pts[-1])
+    elif len(anchors) >= 2:
+        anchors[-1] = poly_pts[-1]
+    return anchors
+
+
+def _monotone_cubic_eval(
+    anchors: list[tuple[float, float]],
+    w: int,
+) -> tuple[list[Optional[float]], list[float]]:
+    """对锚点做 Fritsch-Carlson 单调三次样条插值（绝不过冲），返回每像素列 y 值与斜率。"""
+    y_col: list[Optional[float]] = [None] * w
+    slope_col: list[float] = [0.0] * w
+    m_pts = len(anchors)
+    if m_pts < 2:
+        return y_col, slope_col
+
+    # 确保 x 严格递增
+    dedup: list[tuple[float, float]] = [anchors[0]]
+    for ax, ay in anchors[1:]:
+        if ax - dedup[-1][0] >= 0.5:
+            dedup.append((ax, ay))
+        else:
+            dedup[-1] = (dedup[-1][0], ay)
+    if len(dedup) < 2:
+        dedup = [anchors[0], (anchors[0][0] + 1.0, anchors[-1][1])]
+
+    xs = [p[0] for p in dedup]
+    ys = [p[1] for p in dedup]
+    k = len(xs)
+    dxs = [xs[i + 1] - xs[i] for i in range(k - 1)]
+    dys = [ys[i + 1] - ys[i] for i in range(k - 1)]
+    secs = [dys[i] / dxs[i] if dxs[i] > 1e-6 else 0.0 for i in range(k - 1)]
+
+    tangents = [0.0] * k
+    tangents[0] = secs[0]
+    tangents[-1] = secs[-1]
+    for i in range(1, k - 1):
+        if secs[i - 1] * secs[i] <= 0.0:
+            tangents[i] = 0.0
+        else:
+            tangents[i] = 0.5 * (secs[i - 1] + secs[i])
+    for i in range(k - 1):
+        if abs(secs[i]) < 1e-9:
+            tangents[i] = 0.0
+            tangents[i + 1] = 0.0
+        else:
+            a = tangents[i] / secs[i]
+            b = tangents[i + 1] / secs[i]
+            h2 = a * a + b * b
+            if h2 > 9.0:
+                tau = 3.0 / math.sqrt(h2)
+                tangents[i] = tau * a * secs[i]
+                tangents[i + 1] = tau * b * secs[i]
+
+    seg_idx = 0
+    x_start = max(0, int(math.floor(xs[0])))
+    x_end = min(w - 1, int(math.ceil(xs[-1])))
+    for x in range(x_start, x_end + 1):
+        px = x + 0.5
+        if px < xs[0]:
+            if xs[0] - px > 1.0:
+                continue
+            y_col[x] = ys[0]
+            slope_col[x] = tangents[0]
+            continue
+        if px > xs[-1]:
+            if px - xs[-1] > 1.0:
+                continue
+            y_col[x] = ys[-1]
+            slope_col[x] = tangents[-1]
+            continue
+        while seg_idx < k - 2 and px > xs[seg_idx + 1]:
+            seg_idx += 1
+        h = dxs[seg_idx]
+        if h <= 1e-6:
+            y_col[x] = ys[seg_idx]
+            slope_col[x] = 0.0
+            continue
+        t = (px - xs[seg_idx]) / h
+        t2 = t * t
+        t3 = t2 * t
+        h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+        h10 = t3 - 2.0 * t2 + t
+        h01 = -2.0 * t3 + 3.0 * t2
+        h11 = t3 - t2
+        y_val = h00 * ys[seg_idx] + h10 * h * tangents[seg_idx] + h01 * ys[seg_idx + 1] + h11 * h * tangents[seg_idx + 1]
+        dh00 = 6.0 * t2 - 6.0 * t
+        dh10 = 3.0 * t2 - 4.0 * t + 1.0
+        dh01 = -6.0 * t2 + 6.0 * t
+        dh11 = 3.0 * t2 - 2.0 * t
+        dy_dt = dh00 * ys[seg_idx] + dh10 * h * tangents[seg_idx] + dh01 * ys[seg_idx + 1] + dh11 * h * tangents[seg_idx + 1]
+        y_col[x] = y_val
+        slope_col[x] = dy_dt / h
+    return y_col, slope_col
+
+
+def _make_aa_sparkline_photo(
+    w: int,
+    h: int,
+    *,
+    y_col: list[Optional[float]],
+    slope_col: list[float],
+    accent_hex: str,
+    bottom_y: float,
+    lw: float = 2.0,
+    master: Optional[tk.Misc] = None,
+) -> tk.PhotoImage:
+    """用 SDF 亚像素抗锯齿 + 纵向渐变透明面积填充渲染平滑电量趋势曲线 PNG。"""
+    iw = max(8, int(w))
+    ih = max(8, int(h))
+    ar, ag, ab = hex_to_rgb(accent_hex)
+    half_w = max(0.6, lw * 0.5)
+    raw_rows: list[bytes] = []
+    for y in range(ih):
+        py = y + 0.5
+        rb = bytearray(1 + iw * 4)
+        pos = 1
+        for x in range(iw):
+            yc = y_col[x]
+            if yc is None:
+                pos += 4
+                continue
+            sc = slope_col[x]
+            dist = abs(py - yc) / math.hypot(1.0, sc)
+            stroke_a = max(0.0, min(1.0, 0.5 + half_w - dist))
+
+            fill_a = 0.0
+            if py >= yc - 0.5 and py <= bottom_y + 0.5:
+                top_cov = max(0.0, min(1.0, py - (yc - 0.5)))
+                bot_cov = max(0.0, min(1.0, (bottom_y + 0.5) - py))
+                span_y = max(4.0, bottom_y - yc)
+                grad = max(0.0, min(1.0, 1.0 - (py - yc) / span_y))
+                fill_a = top_cov * bot_cov * (0.03 + 0.24 * grad)
+
+            out_a = max(stroke_a, fill_a)
+            if out_a > 0.004:
+                rb[pos] = ar
+                rb[pos + 1] = ag
+                rb[pos + 2] = ab
+                rb[pos + 3] = int(min(1.0, out_a) * 255.0 + 0.5)
+            pos += 4
+        raw_rows.append(bytes(rb))
+    b64 = _encode_rgba_png_b64(iw, ih, raw_rows)
+    return tk.PhotoImage(data=b64, master=master)
+
+
 def _blend_aa_capsule_rows(
     rows: list[bytearray],
     tot_w: int,
@@ -7044,42 +7210,47 @@ class NeuSparkline(tk.Frame):
         stat_short = f"高 {hi_v}%{TEXT_SEP}低 {lo_v}%"
         self._lbl_stat.configure(text=stat_full if w >= sx(260, self) else stat_short)
 
-        coords: list[float] = []
         poly_pts: list[tuple[float, float]] = []
+        raw_pt_meta: list[tuple[float, float, int, float]] = []
         for pt in pts:
             frac_x = (float(pt["t"]) - t_min) / t_span
             lvl_i = int(pt["lvl"])
             frac_y = max(0.0, min(100.0, float(lvl_i))) / 100.0
             px = pad_x + frac_x * plot_w
             py = pad_y + (1.0 - frac_y) * plot_h
-            coords.extend((px, py))
             poly_pts.append((px, py))
-            self._plotted_pts.append((px, py, lvl_i, float(pt["t"])))
+            raw_pt_meta.append((px, py, lvl_i, float(pt["t"])))
 
-        # 柔色半透明感面积填充（与当前表面底色按 22% 混合）
-        fg_rgb = hex_to_rgb(self._accent)
-        surf_rgb = hex_to_rgb(self._surface_bg)
-        tint_rgb = blend_rgb(surf_rgb, fg_rgb, 0.22)
-        tint_hex = f"#{tint_rgb[0]:02x}{tint_rgb[1]:02x}{tint_rgb[2]:02x}"
-        area_coords: list[float] = [poly_pts[0][0], h - pad_y]
-        for px, py in poly_pts:
-            area_coords.extend((px, py))
-        area_coords.extend((poly_pts[-1][0], h - pad_y))
-        c.create_polygon(*area_coords, fill=tint_hex, outline="")
+        anchors = _simplify_sparkline_anchors(poly_pts)
+        y_col, slope_col = _monotone_cubic_eval(anchors, w)
+        for px, py, lvl_i, t_val in raw_pt_meta:
+            xi = max(0, min(w - 1, int(round(px - 0.5))))
+            yc = y_col[xi]
+            self._plotted_pts.append((px, yc if yc is not None else py, lvl_i, t_val))
 
         lw = max(1.8, sx(2, self) * 0.95)
-        c.create_line(
-            *coords,
-            fill=self._accent,
-            width=lw,
-            capstyle="round",
-            joinstyle="round",
+        self._curve_photo = _make_aa_sparkline_photo(
+            w,
+            h,
+            y_col=y_col,
+            slope_col=slope_col,
+            accent_hex=self._accent,
+            bottom_y=float(h - pad_y),
+            lw=lw,
+            master=c,
         )
+        c.create_image(0, 0, anchor="nw", image=self._curve_photo)
 
-        # 终点高亮圆点与悬停十字读数同步
+        # 终点抗锯齿圆点与悬停十字读数同步
         ex, ey = poly_pts[-1]
-        r = max(2.5, sx(3, self))
-        c.create_oval(ex - r, ey - r, ex + r, ey + r, fill=self._accent, outline=self._surface_bg, width=1)
+        ey_smooth = y_col[max(0, min(w - 1, int(round(ex - 0.5))))]
+        if ey_smooth is not None:
+            ey = ey_smooth
+        r = max(2.8, sx(3, self))
+        self._end_dot_photo = _make_aa_dot_photo(
+            r, fill_hex=self._accent, ring_hex=self._surface_bg, ring_w=1.3, master=c
+        )
+        c.create_image(ex, ey, anchor="center", image=self._end_dot_photo)
         if self._hover_idx is not None:
             self._draw_hover_overlay()
 
