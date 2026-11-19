@@ -1557,12 +1557,14 @@ def _make_aa_dot_photo(
 
 def _simplify_sparkline_anchors(
     poly_pts: list[tuple[float, float]],
+    *,
+    min_dx: float = 4.0,
 ) -> list[tuple[float, float]]:
-    """把长平台期整数电量折线简化为平滑过渡锚点（保留首尾及陡变处，消除阶梯突变）。"""
+    """把长平台期整数电量折线简化为平滑过渡锚点（保留首尾，消除阶梯突变与过密尖刺）。"""
     n = len(poly_pts)
     if n <= 2:
         return list(poly_pts)
-    anchors: list[tuple[float, float]] = [poly_pts[0]]
+    raw_anchors: list[tuple[float, float]] = [poly_pts[0]]
     i = 0
     while i < n:
         y_val = poly_pts[i][1]
@@ -1571,27 +1573,39 @@ def _simplify_sparkline_anchors(
             j += 1
         if i > 0 and j < n - 1:
             mid_x = 0.5 * (poly_pts[i][0] + poly_pts[j][0])
-            anchors.append((mid_x, y_val))
+            raw_anchors.append((mid_x, y_val))
         i = j + 1
-    if abs(anchors[-1][0] - poly_pts[-1][0]) > 0.5 or abs(anchors[-1][1] - poly_pts[-1][1]) > 0.05:
-        anchors.append(poly_pts[-1])
-    elif len(anchors) >= 2:
-        anchors[-1] = poly_pts[-1]
-    return anchors
+    raw_anchors.append(poly_pts[-1])
+
+    # 按 min_dx 合并过密锚点（首尾严格保留），防止 7天/30天 窗口内 1px 陡跳引发奇异斜率
+    if len(raw_anchors) <= 2:
+        return raw_anchors
+    merged: list[tuple[float, float]] = [raw_anchors[0]]
+    for idx in range(1, len(raw_anchors) - 1):
+        ax, ay = raw_anchors[idx]
+        if ax - merged[-1][0] >= min_dx and raw_anchors[-1][0] - ax >= min_dx * 0.5:
+            merged.append((ax, ay))
+        elif len(merged) > 1:
+            # 与前一个中间锚点融合成平滑均值
+            px, py = merged[-1]
+            merged[-1] = (0.5 * (px + ax), 0.5 * (py + ay))
+    if raw_anchors[-1][0] - merged[-1][0] < 0.5 and len(merged) >= 2:
+        merged[-1] = raw_anchors[-1]
+    else:
+        merged.append(raw_anchors[-1])
+    return merged
 
 
 def _monotone_cubic_eval(
     anchors: list[tuple[float, float]],
     w: int,
-) -> tuple[list[Optional[float]], list[float]]:
-    """对锚点做 Fritsch-Carlson 单调三次样条插值（绝不过冲），返回每像素列 y 值与斜率。"""
+) -> tuple[list[Optional[float]], float, float]:
+    """对锚点做 Fritsch-Carlson 单调三次样条插值（绝不过冲），返回每像素列 y 值及有效 x 范围。"""
     y_col: list[Optional[float]] = [None] * w
-    slope_col: list[float] = [0.0] * w
     m_pts = len(anchors)
     if m_pts < 2:
-        return y_col, slope_col
+        return y_col, 0.0, 0.0
 
-    # 确保 x 严格递增
     dedup: list[tuple[float, float]] = [anchors[0]]
     for ax, ay in anchors[1:]:
         if ax - dedup[-1][0] >= 0.5:
@@ -1634,24 +1648,17 @@ def _monotone_cubic_eval(
     x_end = min(w - 1, int(math.ceil(xs[-1])))
     for x in range(x_start, x_end + 1):
         px = x + 0.5
-        if px < xs[0]:
-            if xs[0] - px > 1.0:
-                continue
+        if px <= xs[0]:
             y_col[x] = ys[0]
-            slope_col[x] = tangents[0]
             continue
-        if px > xs[-1]:
-            if px - xs[-1] > 1.0:
-                continue
+        if px >= xs[-1]:
             y_col[x] = ys[-1]
-            slope_col[x] = tangents[-1]
             continue
         while seg_idx < k - 2 and px > xs[seg_idx + 1]:
             seg_idx += 1
         h = dxs[seg_idx]
         if h <= 1e-6:
             y_col[x] = ys[seg_idx]
-            slope_col[x] = 0.0
             continue
         t = (px - xs[seg_idx]) / h
         t2 = t * t
@@ -1660,15 +1667,13 @@ def _monotone_cubic_eval(
         h10 = t3 - 2.0 * t2 + t
         h01 = -2.0 * t3 + 3.0 * t2
         h11 = t3 - t2
-        y_val = h00 * ys[seg_idx] + h10 * h * tangents[seg_idx] + h01 * ys[seg_idx + 1] + h11 * h * tangents[seg_idx + 1]
-        dh00 = 6.0 * t2 - 6.0 * t
-        dh10 = 3.0 * t2 - 4.0 * t + 1.0
-        dh01 = -6.0 * t2 + 6.0 * t
-        dh11 = 3.0 * t2 - 2.0 * t
-        dy_dt = dh00 * ys[seg_idx] + dh10 * h * tangents[seg_idx] + dh01 * ys[seg_idx + 1] + dh11 * h * tangents[seg_idx + 1]
-        y_col[x] = y_val
-        slope_col[x] = dy_dt / h
-    return y_col, slope_col
+        y_col[x] = (
+            h00 * ys[seg_idx]
+            + h10 * h * tangents[seg_idx]
+            + h01 * ys[seg_idx + 1]
+            + h11 * h * tangents[seg_idx + 1]
+        )
+    return y_col, xs[0], xs[-1]
 
 
 def _make_aa_sparkline_photo(
@@ -1676,33 +1681,63 @@ def _make_aa_sparkline_photo(
     h: int,
     *,
     y_col: list[Optional[float]],
-    slope_col: list[float],
+    x_min: float,
+    x_max: float,
     accent_hex: str,
     bottom_y: float,
     lw: float = 2.0,
     master: Optional[tk.Misc] = None,
 ) -> tk.PhotoImage:
-    """用 SDF 亚像素抗锯齿 + 纵向渐变透明面积填充渲染平滑电量趋势曲线 PNG。"""
+    """用真实线段 SDF 亚像素抗锯齿 + 纵向渐变透明面积填充渲染平滑电量趋势曲线 PNG。"""
     iw = max(8, int(w))
     ih = max(8, int(h))
     ar, ag, ab = hex_to_rgb(accent_hex)
     half_w = max(0.6, lw * 0.5)
+    reach = half_w + 1.2
+    x0_i = max(0, int(math.floor(x_min)) - 2)
+    x1_i = min(iw - 1, int(math.ceil(x_max)) + 2)
+
+    # 预计算每列局部纵向包络 [lo_y, hi_y]，保证零尖刺且跳过远距离像素
+    col_segs: list[list[tuple[float, float, float, float]]] = [[] for _ in range(iw)]
+    col_ymin = [0.0] * iw
+    col_ymax = [-1.0] * iw
+    for x in range(x0_i, x1_i + 1):
+        segs: list[tuple[float, float, float, float]] = []
+        lo_y = 1e9
+        hi_y = -1e9
+        for kx in range(max(0, x - 2), min(iw - 1, x + 2)):
+            ya = y_col[kx]
+            yb = y_col[kx + 1]
+            if ya is not None and yb is not None:
+                segs.append((kx + 0.5, ya, kx + 1.5, yb))
+                lo_y = min(lo_y, ya, yb)
+                hi_y = max(hi_y, ya, yb)
+        col_segs[x] = segs
+        if segs:
+            col_ymin[x] = lo_y - reach
+            col_ymax[x] = hi_y + reach
+
     raw_rows: list[bytes] = []
     for y in range(ih):
         py = y + 0.5
         rb = bytearray(1 + iw * 4)
         pos = 1
-        for x in range(iw):
+        for x in range(x0_i):
+            pos += 4
+        for x in range(x0_i, x1_i + 1):
+            px = x + 0.5
             yc = y_col[x]
-            if yc is None:
-                pos += 4
-                continue
-            sc = slope_col[x]
-            dist = abs(py - yc) / math.hypot(1.0, sc)
-            stroke_a = max(0.0, min(1.0, 0.5 + half_w - dist))
+            stroke_a = 0.0
+            if col_ymin[x] <= py <= col_ymax[x]:
+                best_d = 1e9
+                for sx0, sy0, sx1, sy1 in col_segs[x]:
+                    d = _dist_segment(px, py, sx0, sy0, sx1, sy1)
+                    if d < best_d:
+                        best_d = d
+                stroke_a = max(0.0, min(1.0, 0.5 + half_w - best_d))
 
             fill_a = 0.0
-            if py >= yc - 0.5 and py <= bottom_y + 0.5:
+            if yc is not None and x_min - 0.2 <= px <= x_max + 0.2 and py >= yc - 0.5 and py <= bottom_y + 0.5:
                 top_cov = max(0.0, min(1.0, py - (yc - 0.5)))
                 bot_cov = max(0.0, min(1.0, (bottom_y + 0.5) - py))
                 span_y = max(4.0, bottom_y - yc)
@@ -7222,7 +7257,7 @@ class NeuSparkline(tk.Frame):
             raw_pt_meta.append((px, py, lvl_i, float(pt["t"])))
 
         anchors = _simplify_sparkline_anchors(poly_pts)
-        y_col, slope_col = _monotone_cubic_eval(anchors, w)
+        y_col, x_min_c, x_max_c = _monotone_cubic_eval(anchors, w)
         for px, py, lvl_i, t_val in raw_pt_meta:
             xi = max(0, min(w - 1, int(round(px - 0.5))))
             yc = y_col[xi]
@@ -7233,7 +7268,8 @@ class NeuSparkline(tk.Frame):
             w,
             h,
             y_col=y_col,
-            slope_col=slope_col,
+            x_min=x_min_c,
+            x_max=x_max_c,
             accent_hex=self._accent,
             bottom_y=float(h - pad_y),
             lw=lw,
