@@ -3,7 +3,7 @@
 
 #define MyAppName "外设电量查看器"
 #define MyAppEnName "PeripheralBatteryViewer"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.2"
 #define MyAppExeName "外设电量查看器.exe"
 
 [Setup]

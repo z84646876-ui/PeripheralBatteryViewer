@@ -24,7 +24,7 @@ def _version_quad(ver_str: str) -> tuple[int, int, int, int]:
 
 
 def render_version_info() -> str:
-    ver = str(getattr(tray_common, "APP_VERSION", "1.1.0"))
+    ver = str(getattr(tray_common, "APP_VERSION", "1.1.2"))
     app_name = str(getattr(tray_common, "APP_NAME", "外设电量查看器"))
     build_date = str(getattr(tray_common, "APP_BUILD_DATE", ""))
     quad = _version_quad(ver)

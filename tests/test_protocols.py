@@ -1831,14 +1831,14 @@ class TestGap11Items(unittest.TestCase):
         self.assertEqual(len(jdoc["samples"]), 4)
 
         # #23: Version metadata, update check, make_version_info, CLI --version
-        self.assertEqual(tray_common.__version__, "1.1.0")
+        self.assertEqual(tray_common.__version__, "1.1.2")
         upd = tray_common.check_update_status()
         self.assertTrue(upd["ok"])
         self.assertEqual(upd["status"], "local_only")
         self.assertFalse(upd["update_available"])
         vi_txt = make_version_info.render_version_info()
         self.assertIn("VSVersionInfo", vi_txt)
-        self.assertIn("1.1.0", vi_txt)
+        self.assertIn("1.1.2", vi_txt)
         proc = subprocess.run(
             [sys.executable, os.path.join(_SRC_DIR, "my_devices.py"), "--version", "--json"],
             capture_output=True,
@@ -1848,7 +1848,7 @@ class TestGap11Items(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         ver_json = json.loads(proc.stdout.strip())
-        self.assertEqual(ver_json["version"], "1.1.0")
+        self.assertEqual(ver_json["version"], "1.1.2")
 
         # #25: BLE GATT grouping, multi-part battery, and HFP+BLE deduplication
         ble_list = bt_battery._build_ble_gatt_devices([
