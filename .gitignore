@@ -1,0 +1,32 @@
+# Python / 虚拟环境 / 编译缓存
+__pycache__/
+*.py[cod]
+*$py.class
+.build_venv/
+.venv/
+venv/
+
+# PyInstaller 与打包临时/输出目录
+.build_tmp/
+build/
+dist/
+dist_installer/
+*.spec
+*.exe
+
+# 本地运行日志与个人配置/历史数据
+*.log
+app_error.log*
+tray_config.json
+battery_history.json
+alert_history.json
+user_protocols.json
+tray_heartbeat.json
+tray_quit.flag
+data_dir.txt
+portable.flag
+
+# 本地测试/自签名证书
+*.pfx
+*.cer
+*.p12

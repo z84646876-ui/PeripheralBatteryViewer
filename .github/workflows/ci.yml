@@ -1,0 +1,47 @@
+name: Windows Build & Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependency (PyInstaller)
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Bytecode compile check
+        run: python -m compileall -q .
+
+      - name: Run full unit test suite
+        run: python -m unittest discover -s tests -v
+
+      - name: Build standalone Windows executable
+        run: cmd /c build_exe.bat
+
+      - name: Verify frozen executable CLI and stage artifact
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "..\外设电量查看器.exe" -ArgumentList "--once","--json" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Frozen CLI exited with $($p.ExitCode)" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "..\外设电量查看器.exe" "dist\外设电量查看器.exe" -Force
+
+      - name: Upload built executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PeripheralBatteryViewer-win64
+          path: dist/外设电量查看器.exe
+          if-no-files-found: error
