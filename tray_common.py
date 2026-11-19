@@ -389,7 +389,7 @@ def _parse_semver(ver: str) -> tuple[int, ...]:
     return tuple(nums) if nums else (0,)
 
 
-def check_update_status(timeout_s: float = 3.0, update_url: Optional[str] = None) -> dict[str, Any]:
+def check_update_status(timeout_s: float = 10.0, update_url: Optional[str] = None) -> dict[str, Any]:
     """查询更新清单（支持自定义 JSON 清单与 GitHub Releases API），返回完整版本、下载地址与 SHA-256。"""
     if update_url is not None:
         url = str(update_url).strip()
@@ -492,6 +492,11 @@ def check_update_status(timeout_s: float = 3.0, update_url: Optional[str] = None
             "message": msg,
         }
     except Exception as exc:
+        err_s = str(exc)
+        if "timed out" in err_s.lower() or "timeout" in err_s.lower():
+            msg = f"连接更新源超时（如访问 GitHub 较慢请检查网络/代理后重试）：{err_s}"
+        else:
+            msg = f"检查更新失败：{err_s}"
         return {
             "ok": False,
             "status": "error",
@@ -502,7 +507,7 @@ def check_update_status(timeout_s: float = 3.0, update_url: Optional[str] = None
             "download_url": "",
             "sha256": "",
             "notes": "",
-            "message": f"检查更新失败：{exc}",
+            "message": msg,
         }
 
 

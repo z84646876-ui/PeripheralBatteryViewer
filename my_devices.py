@@ -4244,7 +4244,18 @@ class BatteryPanelApp:
             radius=12, pad=4, padx=9, pady=3, font_size=neu_ui.FONT_CAPTION,
         ).pack(side="right")
 
-        init_status = tray_common.check_update_status()
+        init_status = (
+            {
+                "ok": True,
+                "status": "ready",
+                "current_version": tray_common.APP_VERSION,
+                "latest_version": tray_common.APP_VERSION,
+                "update_available": False,
+                "message": f"当前版本 v{tray_common.APP_VERSION} · 点击「检查更新」查询最新版本",
+            }
+            if cur_url
+            else tray_common.check_update_status()
+        )
         upd_var = tk.StringVar(value=init_status.get("message", ""))
         lbl_upd = tk.Label(
             modal.body,
