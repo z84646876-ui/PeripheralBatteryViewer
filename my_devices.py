@@ -4224,8 +4224,13 @@ class BatteryPanelApp:
         ).pack(side="left")
         cur_url = str(self.cfg.get("update_url") or "")
         url_var = tk.StringVar(value=cur_url)
+        btn_save_url = neu_ui.NeuButton(
+            url_row, text="保存源", command=lambda: (_save_url(), upd_var.set("已保存更新源配置")),
+            radius=12, pad=4, padx=9, pady=3, font_size=neu_ui.FONT_CAPTION,
+        )
+        btn_save_url.pack(side="right")
         url_entry = neu_ui.NeuEntry(
-            url_row, textvariable=url_var, width=36,
+            url_row, textvariable=url_var, width=18,
             font_tuple=neu_ui.mono_font(neu_ui.FONT_CAPTION, root=modal.body),
         )
         url_entry.pack(side="left", fill="x", expand=True, padx=(neu_ui.sx(6, modal.body), neu_ui.sx(6, modal.body)))
@@ -4238,11 +4243,6 @@ class BatteryPanelApp:
             tray_common.save_config(c)
             self.cfg = c
             return u
-
-        neu_ui.NeuButton(
-            url_row, text="保存源", command=lambda: (_save_url(), upd_var.set("已保存更新源配置")),
-            radius=12, pad=4, padx=9, pady=3, font_size=neu_ui.FONT_CAPTION,
-        ).pack(side="right")
 
         init_status = (
             {

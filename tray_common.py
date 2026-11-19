@@ -389,6 +389,86 @@ def _parse_semver(ver: str) -> tuple[int, ...]:
     return tuple(nums) if nums else (0,)
 
 
+def _get_windows_proxy_url() -> str:
+    """读取环境变量或 Windows 注册表代理地址（如 http://127.0.0.1:7897）。"""
+    for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        v = (os.environ.get(k) or "").strip()
+        if v:
+            return v
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings") as rk:
+            en, _ = winreg.QueryValueEx(rk, "ProxyEnable")
+            srv, _ = winreg.QueryValueEx(rk, "ProxyServer")
+        if int(en or 0) == 1 and str(srv or "").strip():
+            s = str(srv).strip()
+            if ";" in s:
+                for part in s.split(";"):
+                    if "=" in part:
+                        pk, pv = part.split("=", 1)
+                        if pk.strip().lower() in ("https", "http") and pv.strip():
+                            s = pv.strip()
+                            break
+            if "://" not in s:
+                s = f"http://{s}"
+            return s
+    except Exception:
+        pass
+    return ""
+
+
+def _fetch_url_bytes(
+    url: str,
+    *,
+    headers: Optional[dict[str, str]] = None,
+    timeout_s: float = 10.0,
+) -> bytes:
+    """优先通过 urllib 请求（兼容单测 mock）；若遇 OpenSSL 代理 EOF/握手异常则回退系统 curl.exe（SChannel + 代理）。"""
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(url, headers=headers or {})
+    t_val = max(0.2, float(timeout_s))
+    try:
+        with urllib.request.urlopen(req, timeout=t_val) as resp:
+            return resp.read()
+    except (ssl.SSLError, urllib.error.URLError) as first_exc:
+        # 先尝试开启 OP_IGNORE_UNEXPECTED_EOF 的默认 SSL 上下文重试
+        try:
+            ctx = ssl.create_default_context()
+            ctx.options |= getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0)
+            proxy_url = _get_windows_proxy_url()
+            handlers: list[Any] = [urllib.request.HTTPSHandler(context=ctx)]
+            if proxy_url:
+                handlers.append(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+            opener = urllib.request.build_opener(*handlers)
+            with opener.open(req, timeout=t_val) as resp:
+                return resp.read()
+        except Exception:
+            pass
+
+        # 回退到 Windows 内置 curl.exe（走 SChannel TLS，对 Clash/mihomo 等本地代理最稳定）
+        if sys.platform == "win32":
+            cmd = ["curl.exe", "-sSLf", "--max-time", str(max(2, int(round(t_val))))]
+            proxy_url = _get_windows_proxy_url()
+            if proxy_url:
+                cmd.extend(["-x", proxy_url])
+            for hk, hv in (headers or {}).items():
+                cmd.extend(["-H", f"{hk}: {hv}"])
+            cmd.append(url)
+            kw: dict[str, Any] = {"capture_output": True, "timeout": t_val + 2.0}
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+            try:
+                cp = subprocess.run(cmd, **kw)
+                if cp.returncode == 0 and cp.stdout:
+                    return cp.stdout
+            except Exception:
+                pass
+        raise first_exc
+
+
 def check_update_status(timeout_s: float = 10.0, update_url: Optional[str] = None) -> dict[str, Any]:
     """查询更新清单（支持自定义 JSON 清单与 GitHub Releases API），返回完整版本、下载地址与 SHA-256。"""
     if update_url is not None:
@@ -436,15 +516,15 @@ def check_update_status(timeout_s: float = 10.0, update_url: Optional[str] = Non
             "message": "更新源地址无效，仅支持 http:// 或 https://",
         }
     try:
-        req = urllib.request.Request(
+        raw_bytes = _fetch_url_bytes(
             url,
             headers={
                 "User-Agent": f"PeripheralBatteryViewer/{APP_VERSION}",
                 "Accept": "application/vnd.github+json, application/json",
             },
+            timeout_s=timeout_s,
         )
-        with urllib.request.urlopen(req, timeout=max(0.2, float(timeout_s))) as resp:
-            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        payload = json.loads(raw_bytes.decode("utf-8", errors="replace"))
         if not isinstance(payload, dict):
             raise ValueError("更新清单格式不是 JSON 对象")
 
